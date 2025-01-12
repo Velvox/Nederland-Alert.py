@@ -34,7 +34,7 @@ async def on_ready():
     change_activity.start()
     fetch_nl_alerts.start()
     fetch_missing_children_cases.start()
-#   fetch_missing_adult_cases.start() Errors with  'NoneType' object is not iterable
+    fetch_missing_adult_cases.start()
     fetch_amber_alerts.start()
     await bot.tree.sync()
     print('[INFO] Slash commands synchronized with Discord.')
@@ -322,6 +322,9 @@ async def fetch_missing_adult_cases():
                 title = case.get('titel', 'Unknown Title')
                 last_seen = case.get('laatstgezienin', 'Unknown Location')
                 missing_since = case.get('vermistsinds', 'Unknown Date')
+                if not missing_since or missing_since.strip() == '':
+                    missing_since = "00-00-0000"
+
                 description = case.get('introductie', 'No Introduction')
                 image_url = case['afbeeldingen'][0]['url'] if case.get('afbeeldingen') else None
                 case_url = case.get('url', '')
@@ -392,13 +395,18 @@ async def send_case_to_discord(uid, title, last_seen, missing_since, description
                     if channel:
                         translated_case_type = CASE_TYPE_TRANSLATIONS.get(case_type, case_type)
 
+                        if missing_since == "00-00-0000":
+                            missing_since_display = "Vermist sinds is onbekend"
+                        else:
+                            missing_since_display = missing_since
+
                         embed = discord.Embed(
                             title=f"Vermist {translated_case_type.capitalize()}: {title}",
                             description=description,
                             color=discord.Color.orange() if case_type == "children" else discord.Color.blue(),
                         )
                         embed.add_field(name="Laatst gezien in", value=last_seen, inline=True)
-                        embed.add_field(name="Vermist sinds", value=missing_since, inline=True)
+                        embed.add_field(name="Vermist sinds", value=missing_since_display, inline=True)
                         if kenmerken:
                             embed.add_field(name="Kenmerken", value=kenmerken, inline=False)
                         embed.add_field(name="Meer informatie over de zaak", value=f"[Informatie via Politie.nl]({case_url})", inline=True)
@@ -419,14 +427,22 @@ async def send_case_to_discord(uid, title, last_seen, missing_since, description
 def extract_kenmerken(signalementen):
     """Extract 'persoonskenmerken' as a formatted string."""
     kenmerken = []
+    
+    if not isinstance(signalementen, list):
+        return "Kenmerken niet bekend"
+    
     for signalement in signalementen:
         persoonskenmerken = signalement.get('persoonskenmerken', [])
+        
+        if not isinstance(persoonskenmerken, list):
+            continue
+        
         for kenmerk in persoonskenmerken:
             label = kenmerk.get('label', 'Unknown Label')
             waarde = kenmerk.get('waarde', 'Unknown Value')
             kenmerken.append(f"__*{label}:*__ {waarde}")
-    return "\n".join(kenmerken) if kenmerken else "No characteristics available."
-
+    
+    return "\n".join(kenmerken) if kenmerken else "Kenmerken niet bekend"
 ### EINGE GEDEELDE FUNCTIES VOOR VERMISTE KINDEREN EN VERMISTE VOLWASSENEN
 
 async def cache_users():
