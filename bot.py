@@ -30,7 +30,6 @@ async def change_activity():
 @bot.event
 async def on_ready():
     print(f'[INFO] Logged in as {bot.user}')
-    await cache_users()
     change_activity.start()
     fetch_nl_alerts.start()
     fetch_missing_children_cases.start()
@@ -129,47 +128,54 @@ async def send_alert_to_discord(alert_id, title, start_at_unix, stop_at_unix):
                 channel_id = channel_entry['channel_id']
                 
                 guild = bot.get_guild(guild_id)
-                if guild:
-                    channel = guild.get_channel(channel_id)
-                    if channel:
-                        title_match = re.match(r'^[^.]+', title)
-                        truncated_title = title_match.group(0) if title_match else title[:256]
+                if not guild:
+                    print(f"[WARNING] Guild not found or bot not in guild: {guild_id}")
+                    continue
 
-                        embed = discord.Embed(
-                            title=f"NL-Alert: {truncated_title}",
-                            description=title,
-                            color=discord.Color.yellow(),
-                        )
-                        embed.add_field(
-                            name=f"Start/Eind tijd",
-                            value=f'Start: <t:{start_at_unix}:R>\nEind: <t:{stop_at_unix}:R>',
-                            inline=False,
-                        )
-                        embed.add_field(
-                            name="Voor meer info check",
-                            value=f"https://actueel.nl-alert.nl/alert/{alert_id}/",
-                            inline=True,
-                        )
-                        embed.add_field(
-                            name="Alert ID",
-                            value=f"{alert_id}",
-                            inline=True,
-                        )
-                        embed.set_footer(text=f"Deze bot is geen onderdeel van de Nederlandse Overheid of NL-Alert en wordt onderhouden door Velvox.")
+                channel = guild.get_channel(channel_id)
+                if not channel:
+                    print(f"[WARNING] Channel not found or bot lacks permissions: {channel_id} in guild {guild_id}")
+                    continue
 
-                        if config.nl_alert_image_url:
-                            embed.set_image(url=config.nl_alert_image_url)
+                title_match = re.match(r'^[^.]+', title)
+                truncated_title = title_match.group(0) if title_match else title[:256]
 
-                        await channel.send(embed=embed)
-                        print(f"[INFO] message sent in channel")
-                        await send_embed_to_all_users(bot, embed)
-                        print(f"[INFO] message sent to individual")
-                    break
+                embed = discord.Embed(
+                    title=f"NL-Alert: {truncated_title}",
+                    description=title,
+                    color=discord.Color.yellow(),
+                )
+                embed.add_field(
+                    name=f"Start/Eind tijd",
+                    value=f'Start: <t:{start_at_unix}:R>\nEind: <t:{stop_at_unix}:R>',
+                    inline=False,
+                )
+                embed.add_field(
+                    name="Voor meer info check",
+                    value=f"https://actueel.nl-alert.nl/alert/{alert_id}/",
+                    inline=True,
+                )
+                embed.add_field(
+                    name="Alert ID",
+                    value=f"{alert_id}",
+                    inline=True,
+                )
+                embed.set_footer(text=f"Deze bot is geen onderdeel van de Nederlandse Overheid of NL-Alert en wordt onderhouden door Velvox.")
+
+                if config.nl_alert_image_url:
+                    embed.set_image(url=config.nl_alert_image_url)
+
+                await channel.send(embed=embed)
+                print(f"[INFO] message sent in channel {channel_id} in guild {guild_id}")
+
+            await send_embed_to_all_users(bot, embed)
+            print(f"[INFO] message sent to individual (once)")
 
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:
         conn.close()
+
 
 ### EINDE NL ALERT BLOK
 
@@ -415,14 +421,19 @@ async def send_case_to_discord(uid, title, last_seen, missing_since, description
                         embed.add_field(name="Technische informatie", value=f"UID: `{uid}`", inline=False)
                         if image_url:
                             embed.set_thumbnail(url=image_url)
-                        embed.set_footer(text=f"Deze bot is niet van de Nederlandse Politie en word onderhouden door Velvox")
+                        embed.set_footer(text=f"Deze bot is niet van de Nederlandse Politie en wordt onderhouden door Velvox")
 
                         await channel.send(embed=embed)
-                        print(f"[INFO] message sent in channel")
-                        await send_embed_to_all_users(bot, embed)
-                        print(f"[INFO] message sent to individual")
+                        print(f"[INFO] message sent in channel {channel_id} in guild {guild_id}")
+
+            await send_embed_to_all_users(bot, embed)
+            print(f"[INFO] message sent to individual")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
     finally:
         conn.close()
+
 
 def extract_kenmerken(signalementen):
     """Extract 'persoonskenmerken' as a formatted string."""
@@ -444,36 +455,6 @@ def extract_kenmerken(signalementen):
     
     return "\n".join(kenmerken) if kenmerken else "Kenmerken niet bekend"
 ### EINGE GEDEELDE FUNCTIES VOOR VERMISTE KINDEREN EN VERMISTE VOLWASSENEN
-
-async def cache_users():
-    conn = pymysql.connect(**db_config)
-    cursor = conn.cursor()
-
-    try:
-        cursor.execute("SELECT user_id FROM discord_dm_users")
-        user_ids = cursor.fetchall()
-
-        for user_data in user_ids:
-            user_id = user_data['user_id']
-            user = bot.get_user(user_id)
-
-            if not user:
-                try:
-                    user = await bot.fetch_user(user_id)
-                    print(f"[INFO] Fetched and cached user {user_id}")
-
-                    cursor.execute("INSERT INTO discord_dm_users (user_id) VALUES (%s) ON DUPLICATE KEY UPDATE user_id=%s", (user.id, user.id))
-                    conn.commit()
-                except discord.NotFound:
-                    print(f"[ERROR] User {user_id} not found.")
-                except discord.Forbidden:
-                    print(f"[WARNING] Cannot fetch user {user_id}; bot lacks permission.")
-                except Exception as e:
-                    print(f"[ERROR] Unexpected error while fetching user {user_id}: {e}")
-
-    finally:
-        cursor.close()
-        conn.close()
 
 @bot.tree.command(name="setchannel")
 async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
