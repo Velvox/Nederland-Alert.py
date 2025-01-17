@@ -37,6 +37,7 @@ async def on_ready():
     fetch_amber_alerts.start()
     await bot.tree.sync()
     print('[INFO] Slash commands synchronized with Discord.')
+    print(f'Bot started successfully')
 
 # Zet ISO 8601 datum om naar Unix timestamp voor Discord
 def iso_to_unix(iso_date):
@@ -180,33 +181,42 @@ async def send_alert_to_discord(alert_id, title, start_at_unix, stop_at_unix):
 ### EINDE NL ALERT BLOK
 
 ### AMBER ALERT BLOK
-@tasks.loop(minutes=10)
+@tasks.loop(minutes=1)
 async def fetch_amber_alerts():
-    url = "https://services.burgernetcdn.nl/landactiehost/api/v1/alerts"
-    response = requests.get(url)
-    print(f"[INFO] Requested Amber Alerts with status code: {response.status_code}")
-
+    url = "https://services.burgernet.nl/landactiehost/api/test/alerts"
+    
     try:
-        xmldata = ET.fromstring(response.content)
+        response = requests.get(url)
+        print(f"[INFO] Requested Amber Alerts with status code: {response.status_code}")
 
-        alerts = xmldata.findall(".//Alert")
-        for alert in alerts:
-            alert_id = alert.find("AlertId").text
-            title = alert.find("Title").text
-            description = alert.find("Description").text
-            description_extended = alert.find("DescriptionExt").text
-            image_url = alert.find("Image").text
-            alert_level = int(alert.find("AlertLevel").text)
-            time_stamp_iso = alert.find("Sent").text
+        if response.status_code == 200:
+#            print(f"[DEBUG] Response Content: {response.text[:500]}") # remove the hashtag for debug option
+            
+            json_response = response.json()
 
-            time_stamp_unix = iso_to_unix(time_stamp_iso)
+            alerts = json_response if isinstance(json_response, list) else []
+            if alerts:
+                for alert in alerts:
+                    alert_id = alert.get("AlertId")
+                    title = alert.get("Message", {}).get("Title", "No Title")
+                    description = alert.get("Message", {}).get("Description", "No Description")
+                    description_extended = alert.get("Message", {}).get("DescriptionExt", "No Extended Description")
+                    read_more = alert.get("Message", {}).get("Readmore_URL", "No Read more URL")
+                    image_url = alert.get("Message", {}).get("Media", {}).get("Image", "No Image URL")
+                    alert_level = int(alert.get("AlertLevel", 0))
+                    time_stamp_unix = alert.get("Sent", "0")
 
-            if alert_id and not amber_exists(alert_id):
-                save_amber_to_db(alert_id, title, description, description_extended, alert_level, time_stamp_unix, image_url)
+                    if alert_id and not amber_exists(alert_id):
+                        save_amber_to_db(alert_id, title, description, description_extended, alert_level, time_stamp_unix, image_url)
+                        await send_amber_alert_to_discord(alert_id, title, description, description_extended, alert_level, time_stamp_unix, image_url, read_more)
 
-                await send_amber_alert_to_discord(alert_id, title, description, description_extended, alert_level, time_stamp_unix, image_url)
+                print("[INFO] Successfully processed Amber Alerts.")
+            else:
+                print("[INFO] No alerts found in the JSON response.")
+        else:
+            print(f"[ERROR] Failed to retrieve Amber Alerts: HTTP {response.status_code}")
     except Exception as e:
-        print(f"[ERROR] Failed to process Amber Alert API response: {e} Possibly no alerts?")
+        print(f"[ERROR] Unexpected error: {e}")
 
 def amber_exists(alert_id):
     conn = pymysql.connect(**db_config)
@@ -232,7 +242,7 @@ def save_amber_to_db(alert_id, title, description, description_extended, alert_l
     finally:
         conn.close()
 
-async def send_amber_alert_to_discord(alert_id, title, description, description_extended, alert_level, time_stamp_unix, image_url):
+async def send_amber_alert_to_discord(alert_id, title, description, description_extended, alert_level, time_stamp_unix, image_url, read_more):
     conn = pymysql.connect(**db_config)
     try:
         with conn.cursor() as cursor:
@@ -249,15 +259,17 @@ async def send_amber_alert_to_discord(alert_id, title, description, description_
                     channel = guild.get_channel(channel_id)
                     if channel:
                         alert_type = "Nationaal" if alert_level == 10 else "Regionaal" if alert_level == 5 else "Onbekend"
+                        is_it_amber = "AMBER ALERT" if alert_level == 10 else "Vermist Kind Alert" if alert_level == 5 else "Urgentie onbekend"
                         embed = discord.Embed(
-                            title=f"AMBER ALERT: {title} heeft jou hulp nodig!",
+                            title=f"{is_it_amber}: {title} is {description_extended} en heeft jou hulp nodig!",
                             description=description,
                             color=discord.Color.orange(),
                         )
-                        embed.add_field(name="Uitgebreide Beschrijving", value=description_extended, inline=False)
-                        embed.add_field(name="Type melding", value=alert_type, inline=False)
-                        embed.add_field(name="Verstuurd", value=f"<t:{time_stamp_unix}:R>", inline=False)
+                        embed.add_field(name="Type melding", value=alert_type, inline=True)
+                        embed.add_field(name="Verstuurd", value=f"<t:{time_stamp_unix}:R>", inline=True)
+                        embed.add_field(name="Meer informatie", value=read_more, inline=False)
                         embed.add_field(name="Alert ID", value=f"{alert_id}", inline=True)
+                        embed.add_field(name="Checken of deze alert nog actief is?", value=f"Deze discord bot update de alerts niet achteraf dus wilt u checken of deze nog actief is ga naar: {read_more}", inline=False)
 
                         if image_url:
                             embed.set_image(url=image_url)
@@ -306,8 +318,6 @@ async def fetch_missing_children_cases():
             print("[ERROR] Unexpected JSON format: 'vermisten' is not a list.")
     except Exception as e:
         print(f"[ERROR] Failed to process API response: {e}")
-
-
 
 ### EINDE POLITIE API V4 VERMISTE KINDEREN
 
@@ -511,12 +521,12 @@ async def dm_notify(interaction: discord.Interaction):
         try:
             await dm_channel.send("You subscribed to receive NL-Alerts in your DMs.")
         except discord.Forbidden:
-            await interaction.response.send_message("I cannot send you DMs. Please check your privacy settings.", ephemeral=True)
+            await interaction.response.send_message("Hey ik kan je geen DM's sturen. Stuur eerst een bericht naar mij of pas je privacy settings aan!", ephemeral=True)
             return
 
-        await interaction.response.send_message("You will now receive NL-Alerts in your DMs.", ephemeral=True)
+        await interaction.response.send_message("Je ontvangt vanaf nu berichten in je DM.", ephemeral=True)
     else:
-        await interaction.response.send_message("You are already subscribed to receive NL-Alerts in your DMs.", ephemeral=True)
+        await interaction.response.send_message("Je ontvangt al berichten in je DM.", ephemeral=True)
 
 
 @bot.tree.command(name="dmnotifystop")
@@ -526,9 +536,9 @@ async def dm_notify_stop(interaction: discord.Interaction):
 
     if dm_user_exists(user_id):
         remove_dm_user_from_db(user_id)
-        await interaction.response.send_message("You will no longer receive NL-Alerts in your DMs.", ephemeral=True)
+        await interaction.response.send_message("Je ontvangt geen berichten meer in je DM.", ephemeral=True)
     else:
-        await interaction.response.send_message("You are not subscribed to receive NL-Alerts in your DMs.", ephemeral=True)
+        await interaction.response.send_message("Je ontvangt geen berichten in je DM.", ephemeral=True)
 
 def dm_user_exists(user_id):
     conn = pymysql.connect(**db_config)
