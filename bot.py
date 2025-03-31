@@ -6,7 +6,7 @@ import itertools
 import config
 import requests
 import re
-import xml.etree.ElementTree as ET
+
 
 intents = discord.Intents.default()
 intents.message_content = False
@@ -19,7 +19,8 @@ db_config = config.db_config
 activities = itertools.cycle([
     discord.Activity(type=discord.ActivityType.watching, name="NL-Alerts"),
     discord.Activity(type=discord.ActivityType.watching, name="Amber Alerts"),
-    discord.Activity(type=discord.ActivityType.playing, name="Politie V4 API")
+#    discord.Activity(type=discord.ActivityType.playing, name="Politie V4 API")
+    discord.Activity(type=discord.ActivityType.watching, name="Politie API ondervind problemen")
 ])
 
 @tasks.loop(seconds=5)
@@ -183,7 +184,7 @@ async def send_alert_to_discord(alert_id, title, start_at_unix, stop_at_unix):
 ### AMBER ALERT BLOK
 @tasks.loop(minutes=1)
 async def fetch_amber_alerts():
-    url = "https://services.burgernet.nl/landactiehost/api/test/alerts"
+    url = "https://services.burgernet.nl/landactiehost/api/v1/alerts"
     
     try:
         response = requests.get(url)
@@ -468,16 +469,16 @@ def extract_kenmerken(signalementen):
 
 @bot.tree.command(name="setchannel")
 async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    """Set the channel for receiving NL-alerts."""
+    """Stel het kanaal in waarin je alerts wilt ontvangen"""
 
     guild_id = interaction.guild.id
     channel_id = channel.id
 
     if not channel_exists(guild_id, channel_id):
         save_channel_to_db(guild_id, channel_id)
-        await interaction.response.send_message(f"NL-Alerts will now be sent to {channel.mention}.", ephemeral=True)
+        await interaction.response.send_message(f"Alerts will now be sent to {channel.mention}.", ephemeral=True)
     else:
-        await interaction.response.send_message(f"NL-Alerts are already set for {channel.mention}.", ephemeral=True)
+        await interaction.response.send_message(f"Alerts are already set for {channel.mention}.", ephemeral=True)
 
 def channel_exists(guild_id, channel_id):
     """Check if the channel already exists in the database for the given guild."""
@@ -504,7 +505,7 @@ def save_channel_to_db(guild_id, channel_id):
 
 @bot.tree.command(name="dmnotify")
 async def dm_notify(interaction: discord.Interaction):
-    """Opt-in to receive NL-Alerts in your DMs."""
+    """Opt-in om alerts te ontvangen in je DM."""
     user_id = interaction.user.id
 
     if not dm_user_exists(user_id):
@@ -519,7 +520,7 @@ async def dm_notify(interaction: discord.Interaction):
                 return
 
         try:
-            await dm_channel.send("You subscribed to receive NL-Alerts in your DMs.")
+            await dm_channel.send("You subscribed to receive alerts in your DMs.")
         except discord.Forbidden:
             await interaction.response.send_message("Hey ik kan je geen DM's sturen. Stuur eerst een bericht naar mij of pas je privacy settings aan!", ephemeral=True)
             return
@@ -531,7 +532,7 @@ async def dm_notify(interaction: discord.Interaction):
 
 @bot.tree.command(name="dmnotifystop")
 async def dm_notify_stop(interaction: discord.Interaction):
-    """Opt-out of receiving NL-Alerts in your DMs."""
+    """Opt-out om geen alerts te ontvangen in je DM."""
     user_id = interaction.user.id
 
     if dm_user_exists(user_id):
@@ -539,6 +540,88 @@ async def dm_notify_stop(interaction: discord.Interaction):
         await interaction.response.send_message("Je ontvangt geen berichten meer in je DM.", ephemeral=True)
     else:
         await interaction.response.send_message("Je ontvangt geen berichten in je DM.", ephemeral=True)
+
+@bot.tree.command(name="amberalert")
+async def amberalert(interaction: discord.Interaction):
+    """Vraag de meest recente Amber Alert op."""
+
+    url = "https://services.burgernet.nl/landactiehost/api/v1/alerts"
+    
+    try:
+        response = requests.get(url)
+        print(f"[INFO] Requested (on user interaction) Amber Alerts with status code: {response.status_code}")
+
+        if response.status_code == 200:
+            json_response = response.json()
+            alerts = json_response if isinstance(json_response, list) else []
+
+            if alerts:
+                # Use the first alert from the list. Modify if you want to handle multiple alerts.
+                alert = alerts[0]
+                alert_id = alert.get("AlertId", "N/A")
+                title = alert.get("Message", {}).get("Title", "No Title")
+                description = alert.get("Message", {}).get("Description", "No Description")
+                description_extended = alert.get("Message", {}).get("DescriptionExt", "No Extended Description")
+                read_more = alert.get("Message", {}).get("Readmore_URL", "No Read more URL")
+                image_url = alert.get("Message", {}).get("Media", {}).get("Image", "")
+                alert_level = int(alert.get("AlertLevel", 0))
+                time_stamp_unix = alert.get("Sent", "0")
+
+                alert_type = "Nationaal" if alert_level == 10 else "Regionaal" if alert_level == 5 else "Onbekend"
+                is_it_amber = "AMBER ALERT" if alert_level == 10 else "Vermist Kind Alert" if alert_level == 5 else "Urgentie onbekend"
+                embed = discord.Embed(
+                    title=f"{is_it_amber}: {title} is {description_extended} en heeft jou hulp nodig!",
+                    description=description,
+                    color=discord.Color.orange(),
+                )
+                embed.add_field(name="Type melding", value=alert_type, inline=True)
+                embed.add_field(name="Verstuurd", value=f"<t:{time_stamp_unix}:R>", inline=True)
+                embed.add_field(name="Meer informatie", value=read_more, inline=False)
+                embed.add_field(name="Alert ID", value=f"{alert_id}", inline=True)
+                embed.add_field(
+                    name="Checken of deze alert nog actief is?",
+                    value=f"Deze discord bot update de alerts niet achteraf dus wilt u checken of deze nog actief is ga naar: {read_more}",
+                    inline=False
+                )
+
+                if image_url:
+                    embed.set_image(url=image_url)
+
+                embed.set_footer(text="Deze bot is geen onderdeel van de overheid en wordt onderhouden door Velvox.")
+
+                await interaction.response.send_message(embed=embed)
+                print(f"[INFO] Bot responded with Amber Alert to /amberalert command.")
+                return
+            else:
+                # No alerts found; respond with an embed stating that
+                embed = discord.Embed(
+                    title="Geen Amber Alerts",
+                    description="Er zijn momenteel geen Amber Alerts.",
+                    color=discord.Color.green()
+                )
+                await interaction.response.send_message(embed=embed)
+                print("[INFO] No Amber Alerts found; responded with a 'no alerts' embed.")
+                return
+        else:
+            # Non-200 status code; inform the user.
+            embed = discord.Embed(
+                title="Error",
+                description=f"Failed to retrieve Amber Alerts: HTTP {response.status_code}",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed)
+            print(f"[ERROR] Failed to retrieve Amber Alerts: HTTP {response.status_code}")
+            return
+
+    except Exception as e:
+        print(f"[ERROR] Unexpected error: {e}")
+        embed = discord.Embed(
+            title="Error",
+            description="Er is een onverwachte fout opgetreden bij het ophalen van Amber Alerts.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed)
+        return
 
 def dm_user_exists(user_id):
     conn = pymysql.connect(**db_config)
