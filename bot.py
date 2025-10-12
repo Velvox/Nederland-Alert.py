@@ -1,26 +1,53 @@
-import pymysql
-import discord
-from discord.ext import commands, tasks
+import pymysql # pyright: ignore[reportMissingModuleSource]
+import discord # pyright: ignore[reportMissingImports]
+from discord.ext import commands, tasks # pyright: ignore[reportMissingImports]
 from datetime import datetime
 import itertools
-import config
 import requests
 import re
+import math
+from dotenv import dotenv_values
 
 
 intents = discord.Intents.default()
 intents.message_content = False
 intents.members = False
 
-bot = commands.Bot(command_prefix='/', intents=intents)
+bot = commands.Bot(command_prefix=lambda bot, msg: [], intents=intents)
 
-db_config = config.db_config
+# DotEnv configuration
+config = dotenv_values(".env")
+MYSQLHOST           = config.get("MYSQLHOST")
+MYSQLUSER           = config.get("MYSQLUSER")
+MYSQLPASSOWRD       = config.get("MYSQLPASSOWRD")
+MYSQLDATABASE       = config.get("MYSQLDATABASE")
+MYSQLPORT           = int(config.get("MYSQLPORT", 3306)) # pyright: ignore[reportArgumentType]
+MYSQLCACERTPATH     = config.get("MYSQLCACERTPATH")
+
+BOT_TOKEN                 = config.get("BOT_TOKEN")
+NL_ALERT_IMAGE_URL        = config.get("NL_ALERT_IMAGE_URL")
+POLITIE_V5_API_VERMIST    = config.get("POLITIE_V5_API_VERMIST")
+AMBER_ALERT_API           = config.get("AMBER_ALERT_API")
+NL_ALERT_API              = config.get("NL_ALERT_API")
+
+
+
+db_config = {
+    'host': MYSQLHOST,  # Change this to your MySQL host
+    'user': MYSQLUSER,  # Your MySQL username
+    'password': MYSQLPASSOWRD,  # Your MySQL password
+    'database': MYSQLDATABASE,  # Your database name
+    'port': int(MYSQLPORT), # MySQL port
+    'cursorclass': pymysql.cursors.DictCursor,
+    'ssl': {
+        'ca': f'{MYSQLCACERTPATH}',
+    }
+}
 
 activities = itertools.cycle([
     discord.Activity(type=discord.ActivityType.watching, name="NL-Alerts"),
     discord.Activity(type=discord.ActivityType.watching, name="Amber Alerts"),
-#    discord.Activity(type=discord.ActivityType.playing, name="Politie V4 API")
-    discord.Activity(type=discord.ActivityType.watching, name="Politie API ondervind problemen")
+    discord.Activity(type=discord.ActivityType.playing, name="Politie V5 API")
 ])
 
 @tasks.loop(seconds=5)
@@ -31,11 +58,10 @@ async def change_activity():
 @bot.event
 async def on_ready():
     print(f'[INFO] Logged in as {bot.user}')
-    change_activity.start()
-    fetch_nl_alerts.start()
-    fetch_missing_children_cases.start()
-    fetch_missing_adult_cases.start()
-    fetch_amber_alerts.start()
+    change_activity.start() # pyright: ignore[reportFunctionMemberAccess]
+    fetch_nl_alerts.start() # pyright: ignore[reportFunctionMemberAccess]
+    fetch_amber_alerts.start() # pyright: ignore[reportFunctionMemberAccess]
+    fetch_missing_persons.start() # pyright: ignore[reportFunctionMemberAccess] # V5 LOOP
     await bot.tree.sync()
     print('[INFO] Slash commands synchronized with Discord.')
     print(f'Bot started successfully')
@@ -54,7 +80,7 @@ async def send_embed_to_all_users(bot, embed):
         user_ids = cursor.fetchall()
 
         for user_id in user_ids:
-            user = await bot.fetch_user(user_id['user_id'])
+            user = await bot.fetch_user(user_id['user_id']) # pyright: ignore[reportArgumentType, reportCallIssue]
             await user.send(embed=embed)
 
     except Exception as e:
@@ -63,11 +89,10 @@ async def send_embed_to_all_users(bot, embed):
         cursor.close()
         connection.close()
 
-### NL ALERT BLOK
+### NL-ALERT BLOK
 @tasks.loop(minutes=2)
 async def fetch_nl_alerts():
-    url = "https://api.public-warning.app/api/v1/providers/nl-alert/alerts"
-    response = requests.get(url)
+    response = requests.get(NL_ALERT_API) # pyright: ignore[reportArgumentType]
     print(f"[INFO] Requested alerts with status code: {response.status_code}")
 
     try:
@@ -103,7 +128,7 @@ def alert_exists(alert_id):
             query = "SELECT COUNT(*) AS count FROM alerts WHERE id = %s"
             cursor.execute(query, (alert_id,))
             result = cursor.fetchone()
-            return result['count'] > 0
+            return result['count'] > 0 # pyright: ignore[reportOptionalSubscript, reportArgumentType, reportCallIssue]
     finally:
         conn.close()
 
@@ -126,8 +151,8 @@ async def send_alert_to_discord(alert_id, title, start_at_unix, stop_at_unix):
             channels = cursor.fetchall()
 
             for channel_entry in channels:
-                guild_id = channel_entry['guild_id']
-                channel_id = channel_entry['channel_id']
+                guild_id = channel_entry['guild_id'] # pyright: ignore[reportArgumentType, reportCallIssue]
+                channel_id = channel_entry['channel_id'] # pyright: ignore[reportArgumentType, reportCallIssue]
                 
                 guild = bot.get_guild(guild_id)
                 if not guild:
@@ -164,13 +189,13 @@ async def send_alert_to_discord(alert_id, title, start_at_unix, stop_at_unix):
                 )
                 embed.set_footer(text=f"Deze bot is geen onderdeel van de Nederlandse Overheid of NL-Alert en wordt onderhouden door Velvox.")
 
-                if config.nl_alert_image_url:
-                    embed.set_image(url=config.nl_alert_image_url)
+                if NL_ALERT_IMAGE_URL:
+                    embed.set_image(url=NL_ALERT_IMAGE_URL)
 
                 await channel.send(embed=embed)
                 print(f"[INFO] message sent in channel {channel_id} in guild {guild_id}")
 
-            await send_embed_to_all_users(bot, embed)
+            await send_embed_to_all_users(bot, embed) # pyright: ignore[reportPossiblyUnboundVariable]
             print(f"[INFO] message sent to individual (once)")
 
     except Exception as e:
@@ -183,11 +208,9 @@ async def send_alert_to_discord(alert_id, title, start_at_unix, stop_at_unix):
 
 ### AMBER ALERT BLOK
 @tasks.loop(minutes=1)
-async def fetch_amber_alerts():
-    url = "https://services.burgernet.nl/landactiehost/api/v1/alerts"
-    
+async def fetch_amber_alerts():    
     try:
-        response = requests.get(url)
+        response = requests.get(AMBER_ALERT_API) # pyright: ignore[reportArgumentType]
         print(f"[INFO] Requested Amber Alerts with status code: {response.status_code}")
 
         if response.status_code == 200:
@@ -226,7 +249,7 @@ def amber_exists(alert_id):
             query = "SELECT COUNT(*) AS count FROM amber_alerts WHERE id = %s"
             cursor.execute(query, (alert_id,))
             result = cursor.fetchone()
-            return result['count'] > 0
+            return result['count'] > 0 # pyright: ignore[reportOptionalSubscript, reportArgumentType, reportCallIssue]
     finally:
         conn.close()
 
@@ -252,8 +275,8 @@ async def send_amber_alert_to_discord(alert_id, title, description, description_
             channels = cursor.fetchall()
 
             for channel_entry in channels:
-                guild_id = channel_entry['guild_id']
-                channel_id = channel_entry['channel_id']
+                guild_id = channel_entry['guild_id'] # pyright: ignore[reportArgumentType, reportCallIssue]
+                channel_id = channel_entry['channel_id'] # pyright: ignore[reportArgumentType, reportCallIssue]
                 
                 guild = bot.get_guild(guild_id)
                 if guild:
@@ -285,187 +308,194 @@ async def send_amber_alert_to_discord(alert_id, title, description, description_
     finally:
         conn.close()
 
-### EINGE AMBER ALERT BLOK
+### EINDE AMBER ALERT BLOK
 
-### POLITIE API V4 VERMISTE KINDEREN
-@tasks.loop(minutes=10)
-async def fetch_missing_children_cases():
-    url = "https://api.politie.nl/v4/vermist/vermistekinderen?language=nl&radius=5.0&maxnumberofitems=10&offset=0"
-    response = requests.get(url)
-    print(f"[INFO] Requested missing children data with status code: {response.status_code}")
+### POLITIE API V5
 
-    try:
-        json_response = response.json()
-        children_cases = json_response.get('vermisten', [])
-
-        if isinstance(children_cases, list):
-            for case in children_cases:
-                uid = case.get('uid')
-                title = case.get('titel', 'Unknown Title')
-                last_seen = case.get('laatstgezienin', 'Unknown Location')
-                missing_since = case.get('vermistsinds', 'Unknown Date')
-                description = case.get('introductie', 'No Introduction')
-                image_url = case['afbeeldingen'][0]['url'] if case.get('afbeeldingen') else None
-                case_url = case.get('url', '')
-                video_url = case['videos'][0]['url'] if case.get('videos') else None
-                kenmerken = extract_kenmerken(case.get('signalementen', []))
-
-                print(f"[INFO] Processing child case UID: {uid}")
-
-                if uid and not case_exists(uid, "children"):
-                    save_case_to_db(uid, title, last_seen, missing_since, description, image_url, case_url, video_url, kenmerken, "children")
-                    await send_case_to_discord(uid, title, last_seen, missing_since, description, image_url, case_url, video_url, kenmerken, "children")
-        else:
-            print("[ERROR] Unexpected JSON format: 'vermisten' is not a list.")
-    except Exception as e:
-        print(f"[ERROR] Failed to process API response: {e}")
-
-### EINDE POLITIE API V4 VERMISTE KINDEREN
-
-### POLITIE API V4 VERMISTE VOLWASSENEN
-@tasks.loop(minutes=10)
-async def fetch_missing_adult_cases():
-    url = "https://api.politie.nl/v4/vermist/vermistevolwassenen?language=nl&radius=5.0&maxnumberofitems=10&offset=0"
-    response = requests.get(url)
-    print(f"[INFO] Requested missing adults data with status code: {response.status_code}")
-
-    try:
-        json_response = response.json()
-        adult_cases = json_response.get('vermisten', [])
-
-        if isinstance(adult_cases, list):
-            for case in adult_cases:
-                uid = case.get('uid')
-                title = case.get('titel', 'Unknown Title')
-                last_seen = case.get('laatstgezienin', 'Unknown Location')
-                missing_since = case.get('vermistsinds', 'Unknown Date')
-                if not missing_since or missing_since.strip() == '':
-                    missing_since = "00-00-0000"
-
-                description = case.get('introductie', 'No Introduction')
-                image_url = case['afbeeldingen'][0]['url'] if case.get('afbeeldingen') else None
-                case_url = case.get('url', '')
-                video_url = case['videos'][0]['url'] if case.get('videos') else None
-                kenmerken = extract_kenmerken(case.get('signalementen', []))
-
-                print(f"[INFO] Processing adult case UID: {uid}")
-
-                if uid and not case_exists(uid, "adults"):
-                    save_case_to_db(uid, title, last_seen, missing_since, description, image_url, case_url, video_url, kenmerken, "adults")
-                    await send_case_to_discord(uid, title, last_seen, missing_since, description, image_url, case_url, video_url, kenmerken, "adults")
-        else:
-            print("[ERROR] Unexpected JSON format: 'vermisten' is not a list.")
-    except Exception as e:
-        print(f"[ERROR] Failed to process API response: {e}")
-
-
-### EINDE POLITIE API V4 VERMISTE VOLWASSENEN
-
-### GEDEELDE FUNCTIES VOOR VERMISTE KINDEREN EN VERMISTE VOLWASSENEN
+POLITIE_API_KEY = "YOUR_API_KEY_HERE"
 
 CASE_TYPE_TRANSLATIONS = {
-    "children": "Kind",
-    "adults": "Volwassene"
+    "children": "vermiste-kinderen",
+    "adults": "vermiste-volwassenen"
 }
 
-def save_case_to_db(uid, title, last_seen, missing_since, description, image_url, case_url, video_url, kenmerken, case_type):
-    conn = pymysql.connect(**db_config)
-    table_name = f"missing_{case_type}"
-    try:
-        with conn.cursor() as cursor:
-            query = f"""
-                INSERT INTO {table_name} (uid, title, last_seen, missing_since, description, image_url, case_url, video_url, kenmerken)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-            cursor.execute(query, (uid, title, last_seen, missing_since, description, image_url, case_url, video_url, kenmerken))
-            conn.commit()
-    finally:
-        conn.close()
+def extract_kenmerken(signalementen):
+    if not signalementen:
+        return ""
+    personen = []
+    for s in signalementen:
+        titel = s.get("titel", "Persoon")
+        kenmerken_list = []
+        for key, value in s.items():
+            if key.lower() not in ["titel", "afbeelding"] and value:
+                kenmerken_list.append(f"{key}: {value}")
+        kenmerken_str = ", ".join(kenmerken_list) if kenmerken_list else "Geen kenmerken beschikbaar"
+        personen.append(f"{titel}: {kenmerken_str}")
+    return " | ".join(personen)  # separate each person with a pipe
 
-def case_exists(uid, case_type):
+@tasks.loop(minutes=10)
+async def fetch_missing_persons():
+    print(f"[INFO] Requesting v5 missing cases from Politie API...")
+
+    offset = 0
+    per_page = 10
+    total = None
+
+    while True:
+        full_politie_v5_api_vermist= f"{POLITIE_V5_API_VERMIST}?maxnumberofitems={per_page}&offset={offset}"
+
+        headers = {
+            "Accept": "application/json",
+        }
+
+        response = requests.get(full_politie_v5_api_vermist, headers=headers)
+        print(f"[INFO] Requested data (offset {offset}) → status {response.status_code}")
+
+        if response.status_code in (204, 403):
+            print("[INFO]" if response.status_code == 204 else "[ERROR]", "No results or bad API key.")
+            break
+        if response.status_code != 200:
+            print(f"[ERROR] HTTP {response.status_code}: {response.text[:200]}")
+            break
+
+        try:
+            data = response.json()
+            iterator = data.get("iterator", {})
+            documenten = data.get("documenten", [])
+
+            if total is None:
+                total = iterator.get("total", len(documenten))
+                total_pages = math.ceil(total / per_page)
+                print(f"[INFO] Found {total} total cases ({total_pages} pages).")
+
+            for case in documenten:
+                uid = case.get("uuid")
+                title = case.get("titel", "Onbekende Titel")
+                last_seen = ", ".join(case.get("locatie", [])) if case.get("locatie") else case.get("plaats", "Onbekende Locatie")
+                missing_since = case.get("datum", "Onbekende Datum") or "00-00-0000"
+                description = case.get("introductie", "Geen introductie beschikbaar.")
+                zaaknummer = case.get("zaaknummer") 
+                
+                signalementen = case.get("signalementen", [])
+                image_url = signalementen[0].get("afbeelding") if signalementen else None
+
+                case_url = case.get("url", "")
+                tip_url = case.get("urlTipformulier", "")
+                
+                kenmerken = extract_kenmerken(signalementen)
+                video_url = None
+                case_type = case.get("gezochtType")
+
+                print(f"[INFO] Processing case UUID: {uid}")
+
+                if uid and not case_exists(uid):
+                    save_case_to_db(uid, title, last_seen, missing_since, description,
+                                    image_url, case_url, video_url, kenmerken, case_type, tip_url,
+                                    zaaknummer) 
+                    
+                    await send_case_to_discord(uid, title, last_seen, missing_since,
+                                               description, image_url, case_url, video_url,
+                                               kenmerken, case_type, tip_url, zaaknummer)
+
+            offset += per_page
+            if offset >= total:
+                print(f"[INFO] Finished fetching all {total_pages} pages.") # pyright: ignore[reportPossiblyUnboundVariable]
+                break
+
+        except Exception as e:
+            print(f"[ERROR] Failed to process v5 API response: {e}")
+            break
+
+
+
+# V5 Save&Send
+
+
+def case_exists(uid):
     conn = pymysql.connect(**db_config)
-    table_name = f"missing_{case_type}"
     try:
-        with conn.cursor() as cursor:
-            query = f"SELECT COUNT(*) AS count FROM {table_name} WHERE uid = %s"
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            query = "SELECT COUNT(*) AS count FROM missing WHERE uid = %s"
             cursor.execute(query, (uid,))
             result = cursor.fetchone()
-            return result['count'] > 0
+            return result["count"] > 0 # pyright: ignore[reportOptionalSubscript]
     finally:
         conn.close()
 
-async def send_case_to_discord(uid, title, last_seen, missing_since, description, image_url, case_url, video_url, kenmerken, case_type):
+def save_case_to_db(uid, title, last_seen, missing_since, description,
+                    image_url, case_url, video_url, kenmerken, case_type, tip_url=None,
+                    zaaknummer=None):
     conn = pymysql.connect(**db_config)
     try:
         with conn.cursor() as cursor:
-            query = "SELECT guild_id, channel_id FROM discord_channels"
-            cursor.execute(query)
-            channels = cursor.fetchall()
-
-            for channel_entry in channels:
-                guild_id = channel_entry['guild_id']
-                channel_id = channel_entry['channel_id']
-
-                guild = bot.get_guild(guild_id)
-                if guild:
-                    channel = guild.get_channel(channel_id)
-                    if channel:
-                        translated_case_type = CASE_TYPE_TRANSLATIONS.get(case_type, case_type)
-
-                        if missing_since == "00-00-0000":
-                            missing_since_display = "Vermist sinds is onbekend"
-                        else:
-                            missing_since_display = missing_since
-
-                        embed = discord.Embed(
-                            title=f"Vermist {translated_case_type.capitalize()}: {title}",
-                            description=description,
-                            color=discord.Color.orange() if case_type == "children" else discord.Color.blue(),
-                        )
-                        embed.add_field(name="Laatst gezien in", value=last_seen, inline=True)
-                        embed.add_field(name="Vermist sinds", value=missing_since_display, inline=True)
-                        if kenmerken:
-                            embed.add_field(name="Kenmerken", value=kenmerken, inline=False)
-                        embed.add_field(name="Meer informatie over de zaak", value=f"[Informatie via Politie.nl]({case_url})", inline=True)
-                        if video_url:
-                            embed.add_field(name="Bekijk de video", value=f"[Bekijk de informatie video]({video_url})", inline=True)
-                        embed.add_field(name="Technische informatie", value=f"UID: `{uid}`", inline=False)
-                        if image_url:
-                            embed.set_thumbnail(url=image_url)
-                        embed.set_footer(text=f"Deze bot is niet van de Nederlandse Politie en wordt onderhouden door Velvox")
-
-                        await channel.send(embed=embed)
-                        print(f"[INFO] message sent in channel {channel_id} in guild {guild_id}")
-
-            await send_embed_to_all_users(bot, embed)
-            print(f"[INFO] message sent to individual")
-
+            query = """
+                INSERT INTO missing (
+                    uid, title, last_seen, missing_since, description,
+                    image_url, case_url, video_url, kenmerken, case_type, tip_url, zaaknummer
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(query, (
+                uid, title, last_seen, missing_since, description,
+                image_url, case_url, video_url, kenmerken, case_type, tip_url, zaaknummer
+            ))
+            conn.commit()
+            print(f"[DB] Saved new {case_type} case {uid} → {title} (zaaknummer: {zaaknummer})")
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"[DB ERROR] Failed to save case {uid}: {e}")
     finally:
         conn.close()
 
 
-def extract_kenmerken(signalementen):
-    """Extract 'persoonskenmerken' as a formatted string."""
-    kenmerken = []
-    
-    if not isinstance(signalementen, list):
-        return "Kenmerken niet bekend"
-    
-    for signalement in signalementen:
-        persoonskenmerken = signalement.get('persoonskenmerken', [])
-        
-        if not isinstance(persoonskenmerken, list):
-            continue
-        
-        for kenmerk in persoonskenmerken:
-            label = kenmerk.get('label', 'Unknown Label')
-            waarde = kenmerk.get('waarde', 'Unknown Value')
-            kenmerken.append(f"__*{label}:*__ {waarde}")
-    
-    return "\n".join(kenmerken) if kenmerken else "Kenmerken niet bekend"
-### EINGE GEDEELDE FUNCTIES VOOR VERMISTE KINDEREN EN VERMISTE VOLWASSENEN
+async def send_case_to_discord(uid, title, last_seen, missing_since, description,
+                               image_url, case_url, video_url, kenmerken, case_type,
+                               tip_url=None, zaaknummer=None):
+    conn = pymysql.connect(**db_config)
+    try:
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            cursor.execute("SELECT guild_id, channel_id FROM discord_channels")
+            channels = cursor.fetchall()
+
+            # Main embed with first image
+            main_embed = discord.Embed(
+                title=f"Vermist: {title}",
+                description=description,
+                color=discord.Color.orange() if case_type == "vermiste-kinderen" else discord.Color.blue(),
+                url=case_url
+            )
+            if image_url:
+                main_embed.set_image(url=image_url) 
+
+            main_embed.add_field(name="Laatst gezien in", value=last_seen, inline=True)
+            main_embed.add_field(name="Vermist sinds", value=missing_since or "Onbekend", inline=True)
+            if kenmerken:
+                main_embed.add_field(name="Kenmerken", value=kenmerken, inline=False)
+            if tip_url:
+                main_embed.add_field(name="Tip doorgeven", value=f"[Klik hier om een tip te geven]({tip_url})", inline=False)
+            main_embed.add_field(name="Meer informatie", value=f"[Bekijk op Politie.nl]({case_url})", inline=True)
+            main_embed.add_field(name="Zaaknummer", value=f"`{zaaknummer}`", inline=True)
+            main_embed.add_field(name="Technische informatie", value=f"UID: `{uid}`", inline=False)
+            main_embed.set_footer(text="Deze bot is niet van of in samenwerking met de Nederlandse Politie en wordt onderhouden door Velvox")
+
+        # Send to all configured channels
+        for ch in channels:
+            guild = bot.get_guild(ch["guild_id"])
+            if guild:
+                channel = guild.get_channel(ch["channel_id"])
+                if channel:
+                    await channel.send(embed=main_embed)
+                    print(f"[INFO] Sent case '{title}' with image in guild {guild.name} ({ch['guild_id']})")
+
+        # Optional: send main embed individually to all users
+        await send_embed_to_all_users(bot, main_embed)
+
+    except Exception as e:
+        print(f"[ERROR] Failed to send embed to Discord: {e}")
+    finally:
+        conn.close()
+
+
+#####       END NEW API V5
 
 @bot.tree.command(name="setchannel")
 async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -488,7 +518,7 @@ def channel_exists(guild_id, channel_id):
             query = "SELECT COUNT(*) AS count FROM discord_channels WHERE guild_id = %s AND channel_id = %s"
             cursor.execute(query, (guild_id, channel_id))
             result = cursor.fetchone()
-            return result['count'] > 0
+            return result['count'] > 0 # pyright: ignore[reportOptionalSubscript, reportArgumentType, reportCallIssue]
     finally:
         conn.close()
 
@@ -544,11 +574,9 @@ async def dm_notify_stop(interaction: discord.Interaction):
 @bot.tree.command(name="amberalert")
 async def amberalert(interaction: discord.Interaction):
     """Vraag de meest recente Amber Alert op."""
-
-    url = "https://services.burgernet.nl/landactiehost/api/v1/alerts"
     
     try:
-        response = requests.get(url)
+        response = requests.get(AMBER_ALERT_API) # pyright: ignore[reportArgumentType]
         print(f"[INFO] Requested (on user interaction) Amber Alerts with status code: {response.status_code}")
 
         if response.status_code == 200:
@@ -630,7 +658,7 @@ def dm_user_exists(user_id):
             query = "SELECT COUNT(*) AS count FROM discord_dm_users WHERE user_id = %s"
             cursor.execute(query, (user_id,))
             result = cursor.fetchone()
-            return result['count'] > 0
+            return result['count'] > 0 # pyright: ignore[reportOptionalSubscript, reportArgumentType, reportCallIssue]
     finally:
         conn.close()
 
@@ -665,4 +693,4 @@ def remove_dm_user_from_db(user_id):
     finally:
         conn.close()
 
-bot.run(config.BOT_TOKEN)
+bot.run(BOT_TOKEN)

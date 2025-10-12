@@ -1,0 +1,5 @@
+discord.py
+discord-py-interactions
+pymysql
+requests
+python-dotenv
