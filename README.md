@@ -1,6 +1,8 @@
 # Nederland-Alert.py
 An unofficial open-source Discord bot that uses Dutch government API's to forward governement or Police issued notofication to Discord, in python.
 
+### [Add the bot to your server or account](https://discord.com/oauth2/authorize?client_id=1325457566834364557)
+
 ## Required configuration
 `.env` the environment file is critical and should contain the following.
 
@@ -28,4 +30,5 @@ The code expects a MySQL database with a TLS secured connection, if you run this
     }
 ```
 
-I will not write a complete setup guide because I do not intent that everyone is going run this bot for them selves. I posted this out of transparency. [Click here to invite the application to your Discord server or add it to your 'personal' applications](https://discord.com/oauth2/authorize?client_id=1325457566834364557)
+I will not write a complete setup guide because I do not intent that everyone is going run this bot for them selves. I posted this out of transparency. [Click here to invite the application to your Discord server or add it to your 'personal' applications](https://discord.com/oauth2/authorize?client_id=1325457566834364557). \
+Or check our [Discovery listing](https://discord.com/discovery/applications/1325457566834364557).
