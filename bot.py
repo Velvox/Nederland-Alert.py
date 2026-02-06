@@ -1,12 +1,14 @@
 import pymysql # pyright: ignore[reportMissingModuleSource]
 import discord # pyright: ignore[reportMissingImports]
-from discord.ext import commands, tasks # pyright: ignore[reportMissingImports]
+from discord.ext import commands, tasks # pyright: ignore[reportUnknownVariableType, reportMissingImports]
 from datetime import datetime
 import itertools
 import requests
 import re
 import math
-from dotenv import dotenv_values
+from dotenv import dotenv_values # pyright: ignore[reportMissingImports]
+import asyncio
+import ssl
 
 
 intents = discord.Intents.default()
@@ -30,6 +32,9 @@ POLITIE_V5_API_VERMIST    = config.get("POLITIE_V5_API_VERMIST")
 AMBER_ALERT_API           = config.get("AMBER_ALERT_API")
 NL_ALERT_API              = config.get("NL_ALERT_API")
 
+DISCORD_SEND_INTERVAL = 1.1
+discord_send_queue: asyncio.Queue = asyncio.Queue()
+
 
 
 db_config = {
@@ -39,9 +44,10 @@ db_config = {
     'database': MYSQLDATABASE,  # Your database name
     'port': int(MYSQLPORT), # MySQL port
     'cursorclass': pymysql.cursors.DictCursor,
-    'ssl': {
-        'ca': f'{MYSQLCACERTPATH}',
-    }
+    "ssl": {
+        "cert_reqs": ssl.CERT_NONE,
+        "check_hostname": False,
+    },
 }
 
 activities = itertools.cycle([
@@ -58,6 +64,7 @@ async def change_activity():
 @bot.event
 async def on_ready():
     print(f'[INFO] Logged in as {bot.user}')
+    discord_sender.start() # pyright: ignore[reportFunctionMemberAccess]
     change_activity.start() # pyright: ignore[reportFunctionMemberAccess]
     fetch_nl_alerts.start() # pyright: ignore[reportFunctionMemberAccess]
     fetch_amber_alerts.start() # pyright: ignore[reportFunctionMemberAccess]
@@ -72,22 +79,95 @@ def iso_to_unix(iso_date):
     return int(dt.timestamp())
 
 async def send_embed_to_all_users(bot, embed):
-    connection = pymysql.connect(**db_config)
-    cursor = connection.cursor()
+    conn = pymysql.connect(**db_config)
+    cursor = conn.cursor()
 
     try:
         cursor.execute("SELECT user_id FROM discord_dm_users")
-        user_ids = cursor.fetchall()
+        users = cursor.fetchall()
 
-        for user_id in user_ids:
-            user = await bot.fetch_user(user_id['user_id']) # pyright: ignore[reportArgumentType, reportCallIssue]
-            await user.send(embed=embed)
+        for row in users:
+            try:
+                user = await bot.fetch_user(row["user_id"])
+                await enqueue_discord_send(
+                    lambda u=user, em=embed: u.send(embed=em),
+                    dm_user_id=row["user_id"]
+                )
+            except Exception as e:
+                print(f"[DM ERROR] {e}")
 
-    except Exception as e:
-        print(f"An error occurred: {e}")
     finally:
         cursor.close()
-        connection.close()
+        conn.close()
+
+### CHANNEL VERWIJDER FUNCTIE
+
+def remove_channel_from_db(guild_id, channel_id):
+    conn = pymysql.connect(**db_config)
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM discord_channels WHERE guild_id = %s AND channel_id = %s",
+                (guild_id, channel_id)
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+
+### SENDER QUEUE FUNCTIE
+@tasks.loop(seconds=0.5)
+async def discord_sender():
+    while not discord_send_queue.empty():
+        item = await discord_send_queue.get()
+
+        func = item["func"]
+        dm_user_id = item.get("dm_user_id")
+        guild_id = item.get("guild_id")
+        channel_id = item.get("channel_id")
+
+        try:
+            await func()
+
+        except discord.Forbidden as e:
+            code = getattr(e, "code", None)
+
+            # DM failures → remove user
+            if code in (50007, 50013) and dm_user_id:
+                print(f"[DM BLOCKED] Removing user {dm_user_id}")
+                remove_dm_user_from_db(dm_user_id)
+
+            # Channel permission failure → remove channel
+            elif code == 50013 and guild_id and channel_id:
+                print(f"[CHANNEL BLOCKED] Removing channel {channel_id} in guild {guild_id}")
+                remove_channel_from_db(guild_id, channel_id)
+
+        except discord.NotFound:
+            if guild_id and channel_id:
+                print(f"[CHANNEL GONE] Removing channel {channel_id} in guild {guild_id}")
+                remove_channel_from_db(guild_id, channel_id)
+
+        except discord.HTTPException as e:
+            if e.status == 429:
+                retry_after = getattr(e, "retry_after", 5)
+                print(f"[RATE LIMIT] Sleeping {retry_after}s")
+                await asyncio.sleep(retry_after)
+            else:
+                print(f"[DISCORD ERROR] {e}")
+
+        await asyncio.sleep(DISCORD_SEND_INTERVAL)
+
+
+async def enqueue_discord_send(func, *, dm_user_id=None, guild_id=None, channel_id=None):
+    await discord_send_queue.put({
+        "func": func,
+        "dm_user_id": dm_user_id,
+        "guild_id": guild_id,
+        "channel_id": channel_id,
+    })
+
+
 
 ### NL-ALERT BLOK
 @tasks.loop(minutes=2)
@@ -192,8 +272,11 @@ async def send_alert_to_discord(alert_id, title, start_at_unix, stop_at_unix):
                 if NL_ALERT_IMAGE_URL:
                     embed.set_image(url=NL_ALERT_IMAGE_URL)
 
-                await channel.send(embed=embed)
-                print(f"[INFO] message sent in channel {channel_id} in guild {guild_id}")
+                await enqueue_discord_send(
+                    lambda ch=channel, em=embed: ch.send(embed=em),
+                    guild_id=guild_id,
+                    channel_id=channel_id
+                )
 
             await send_embed_to_all_users(bot, embed) # pyright: ignore[reportPossiblyUnboundVariable]
             print(f"[INFO] message sent to individual (once)")
@@ -300,7 +383,11 @@ async def send_amber_alert_to_discord(alert_id, title, description, description_
 
                         embed.set_footer(text="Deze bot is geen onderdeel van de overheid en wordt onderhouden door Velvox.")
 
-                        await channel.send(embed=embed)
+                        await enqueue_discord_send(
+                            lambda ch=channel, em=embed: ch.send(embed=em),
+                            guild_id=guild_id,
+                            channel_id=channel_id
+                        )
                         print(f"[INFO] Amber Alert sent to Discord channel {channel_id}.")
                         await send_embed_to_all_users(bot, embed)
     except Exception as e:
@@ -311,8 +398,6 @@ async def send_amber_alert_to_discord(alert_id, title, description, description_
 ### EINDE AMBER ALERT BLOK
 
 ### POLITIE API V5
-
-POLITIE_API_KEY = "YOUR_API_KEY_HERE"
 
 CASE_TYPE_TRANSLATIONS = {
     "children": "vermiste-kinderen",
@@ -447,52 +532,92 @@ def save_case_to_db(uid, title, last_seen, missing_since, description,
         conn.close()
 
 
-async def send_case_to_discord(uid, title, last_seen, missing_since, description,
-                               image_url, case_url, video_url, kenmerken, case_type,
-                               tip_url=None, zaaknummer=None):
+async def send_case_to_discord(
+    uid, title, last_seen, missing_since, description,
+    image_url, case_url, video_url, kenmerken, case_type,
+    tip_url=None, zaaknummer=None
+):
     conn = pymysql.connect(**db_config)
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            # Channels
             cursor.execute("SELECT guild_id, channel_id FROM discord_channels")
             channels = cursor.fetchall()
 
-            # Main embed with first image
-            main_embed = discord.Embed(
-                title=f"Vermist: {title}",
-                description=description,
-                color=discord.Color.orange() if case_type == "vermiste-kinderen" else discord.Color.blue(),
-                url=case_url
+            # DM users
+            cursor.execute("SELECT user_id FROM discord_dm_users")
+            dm_users = cursor.fetchall()
+
+        # Build embed ONCE
+        main_embed = discord.Embed(
+            title=f"Vermist: {title}",
+            description=description,
+            color=discord.Color.orange() if case_type == "vermiste-kinderen" else discord.Color.blue(),
+            url=case_url
+        )
+
+        if image_url:
+            main_embed.set_image(url=image_url)
+
+        main_embed.add_field(name="Laatst gezien in", value=last_seen, inline=True)
+        main_embed.add_field(name="Vermist sinds", value=missing_since or "Onbekend", inline=True)
+
+        if kenmerken:
+            main_embed.add_field(name="Kenmerken", value=kenmerken, inline=False)
+
+        if tip_url:
+            main_embed.add_field(
+                name="Tip doorgeven",
+                value=f"[Klik hier om een tip te geven]({tip_url})",
+                inline=False
             )
-            if image_url:
-                main_embed.set_image(url=image_url) 
 
-            main_embed.add_field(name="Laatst gezien in", value=last_seen, inline=True)
-            main_embed.add_field(name="Vermist sinds", value=missing_since or "Onbekend", inline=True)
-            if kenmerken:
-                main_embed.add_field(name="Kenmerken", value=kenmerken, inline=False)
-            if tip_url:
-                main_embed.add_field(name="Tip doorgeven", value=f"[Klik hier om een tip te geven]({tip_url})", inline=False)
-            main_embed.add_field(name="Meer informatie", value=f"[Bekijk op Politie.nl]({case_url})", inline=True)
-            main_embed.add_field(name="Zaaknummer", value=f"`{zaaknummer}`", inline=True)
-            main_embed.add_field(name="Technische informatie", value=f"UID: `{uid}`", inline=False)
-            main_embed.set_footer(text="Deze bot is niet van of in samenwerking met de Nederlandse Politie en wordt onderhouden door Velvox")
+        main_embed.add_field(
+            name="Meer informatie",
+            value=f"[Bekijk op Politie.nl]({case_url})",
+            inline=True
+        )
 
-        # Send to all configured channels
+        main_embed.add_field(name="Zaaknummer", value=f"`{zaaknummer}`", inline=True)
+        main_embed.add_field(name="Technische informatie", value=f"UID: `{uid}`", inline=False)
+
+        main_embed.set_footer(
+            text="Deze bot is niet van of in samenwerking met de Nederlandse Politie en wordt onderhouden door Velvox"
+        )
+
+        # ---- SEND TO CHANNELS ----
         for ch in channels:
             guild = bot.get_guild(ch["guild_id"])
-            if guild:
-                channel = guild.get_channel(ch["channel_id"])
-                if channel:
-                    await channel.send(embed=main_embed)
-                    print(f"[INFO] Sent case '{title}' with image in guild {guild.name} ({ch['guild_id']})")
+            if not guild:
+                continue
 
-        # Optional: send main embed individually to all users
-        await send_embed_to_all_users(bot, main_embed)
+            channel = guild.get_channel(ch["channel_id"])
+            if not channel:
+                continue
+
+            await enqueue_discord_send(
+                lambda c=channel, em=main_embed: c.send(embed=em),
+                guild_id=ch["guild_id"],
+                channel_id=ch["channel_id"]
+            )
+
+        # ---- SEND TO DM USERS ----
+        for row in dm_users:
+            user_id = row["user_id"]
+
+            await enqueue_discord_send(
+                lambda uid=user_id, em=main_embed: send_dm(uid, em),
+                dm_user_id=user_id
+            )
 
     except Exception as e:
         print(f"[ERROR] Failed to send embed to Discord: {e}")
     finally:
         conn.close()
+
+async def send_dm(user_id, embed):
+    user = await bot.fetch_user(user_id)
+    await user.send(embed=embed)
 
 
 #####       END NEW API V5
